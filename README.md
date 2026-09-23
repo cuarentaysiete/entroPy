@@ -28,6 +28,12 @@
 
 ## Graphical User Interface Overview
 
+
+<p align="center">
+  <img src="assets/screenshot.png" alt="EntroPy Interface Screenshot" width="100%">
+</p>
+
+
 ```text
 +-----------------------------------------------------------------------------------+
 |  [Open File]  [ ⇩ Drag & Drop File Here ]  file_sample.bin                        |
