@@ -30,7 +30,7 @@
 
 
 <p align="center">
-  <img src="assets/screenshot.png" alt="EntroPy Interface Screenshot" width="100%">
+  <img src="docs/screenshot.png" alt="EntroPy Interface Screenshot" width="100%">
 </p>
 
 
