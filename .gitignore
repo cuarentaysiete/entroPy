@@ -1,0 +1,22 @@
+# Virtual Environment
+entropy_env/
+venv/
+env/
+
+# Python Cache & Bytecode
+__pycache__/
+*.py[cod]
+
+# macOS System Files
+.DS_Store
+
+# IDE Configurations
+.vscode/
+.idea/
+*.spyder3
+
+# Test files & large binaries
+*.psd
+*.webm
+test files/
+tests/
