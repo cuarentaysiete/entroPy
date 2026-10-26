@@ -79,6 +79,8 @@ $$V = \sqrt{\frac{\chi^2}{255 \cdot N}}$$
 | **$0.05 < V \le 0.30$ ($5.0\% - 30.0\%$)** | Moderate Deviation | Executables (PE, ELF), compiled code, databases |
 | **$V > 0.30$ ($> 30.0\%$)** | High Non-Uniformity | Plain text, zero-padded streams, corrupted data |
 
+> **Note:** Like all chi-square normalizations, Cramér's V decays as $1/\sqrt{N}$ for truly uniform streams (a random 1 MB file typically measures $V \approx 0.001$). The thresholds above are therefore most meaningful for files of $\gtrsim 10\,\mathrm{KB}$; for larger files even minor deviations from uniformity accumulate, which is exactly what the heuristic exploits.
+
 ### 3. Lag-1 Serial Correlation
 Measures linear dependency between adjacent byte pairs $(x_i, x_{i+1})$ across the binary file:
 
@@ -112,20 +114,34 @@ $$r_1 = \frac{\sum_{i=1}^{N-1} (x_i - \bar{x})(x_{i+1} - \bar{x})}{\sum_{i=1}^{N
 
 3. **Install Required Dependencies:**
    ```bash
-   pip install numpy PySide6 pyqtgraph
+   pip install -r requirements.txt
+   # or, for the `entroPy` console command and the test suite:
+   pip install -e ".[dev]"
    ```
 
 ---
 
 ## Usage Guide
 
-### Launching the Application
+### Graphical Interface
 
 Run `gui.py` from your activated virtual environment:
 
 ```bash
 python gui.py
 ```
+
+### Command-Line Interface (headless)
+
+`core.py` doubles as a CLI for scripting, forensics triage, or CI pipelines:
+
+```bash
+python core.py /path/to/file.bin            # human-readable summary
+python core.py file.bin --json              # full machine-readable report
+python core.py file.bin --block-size 8192 --stride 8192   # custom window
+```
+
+The JSON report mirrors the GUI's `AnalysisReport` dataclass (metadata, global metrics, windowed series, trend + rationale).
 
 ### Analyzing Files
 1. **Intake:** Click the **Open File** button or drag and drop any file directly onto the interface.
@@ -141,11 +157,26 @@ python gui.py
 
 ```text
 entroPy/
-├── core.py         # Computational statistics engine, memory-mapping & heuristic classification
+├── core.py         # Computational statistics engine, memory-mapping, heuristics & CLI
 ├── gui.py          # PySide6 desktop interface, PyQtGraph views & interactive event logic
-├── .gitignore      # Exclusion rules for virtual environments, system files & test datasets
+├── pyproject.toml  # Packaging: dependencies, `entroPy` console entry point, dev extras
+├── requirements.txt# Pinned-less runtime dependencies for manual installs
+├── tests/
+│   ├── conftest.py     # Test bootstrap (repo on sys.path, offscreen Qt)
+│   ├── test_core.py    # Engine unit tests: statistics, heuristics, export, CLI
+│   └── test_gui.py     # Headless Qt smoke tests (skipped if PySide6 missing)
+├── .github/
+│   └── workflows/ci.yml# GitHub Actions: pytest on Linux/macOS/Windows, Py 3.10–3.13
+├── .gitignore
 ├── LICENSE         # MIT License declaration
 └── README.md       # Project documentation
+```
+
+### Running the Tests
+
+```bash
+pip install -e ".[dev]"
+python -m pytest
 ```
 
 ---

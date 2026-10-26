@@ -11,6 +11,7 @@ import hashlib
 import math
 import mmap
 import os
+import sys
 from typing import List, Optional, Callable
 import numpy as np
 
@@ -192,19 +193,7 @@ def compute_global_statistics(
     if progress_callback:
         progress_callback(55, "Calculating lag-1 serial correlation...")
 
-    if n_bytes > 1:
-        x = data[:-1].astype(np.float64)
-        y = data[1:].astype(np.float64)
-        mean_x = np.mean(x)
-        mean_y = np.mean(y)
-        var_x = np.sum((x - mean_x) ** 2)
-        var_y = np.sum((y - mean_y) ** 2)
-        cov = np.sum((x - mean_x) * (y - mean_y))
-        
-        denom = math.sqrt(var_x * var_y)
-        serial_correlation = float(cov / denom) if denom != 0 else 0.0
-    else:
-        serial_correlation = 0.0
+    serial_correlation = _compute_serial_correlation(data, progress_callback)
 
     return GlobalMetrics(
         shannon_entropy=shannon_entropy,
@@ -214,6 +203,61 @@ def compute_global_statistics(
         serial_correlation=serial_correlation,
         null_byte_ratio=null_byte_ratio
     )
+
+
+def _compute_serial_correlation(
+    data: np.ndarray,
+    progress_callback: Optional[Callable[[int, str], None]] = None,
+    chunk_size: int = 1 << 22
+) -> float:
+    """Computes lag-1 serial correlation with O(chunk) peak memory.
+
+    Uses a two-pass streaming reduction (means first, then centered moments)
+    over fixed-size chunks instead of materializing two float64 copies of the
+    entire file (~16 bytes per byte), keeping peak allocation constant even
+    for multi-gigabyte inputs.
+    """
+    n_pairs = len(data) - 1
+    if n_pairs <= 0:
+        return 0.0
+
+    x = data[:-1]
+    y = data[1:]
+
+    # Pass 1: raw sums for stable means (float64 accumulation).
+    sum_x = 0.0
+    sum_y = 0.0
+    pos = 0
+    while pos < n_pairs:
+        end = min(pos + chunk_size, n_pairs)
+        sum_x += float(np.sum(x[pos:end], dtype=np.float64))
+        sum_y += float(np.sum(y[pos:end], dtype=np.float64))
+        pos = end
+    mean_x = sum_x / n_pairs
+    mean_y = sum_y / n_pairs
+
+    # Pass 2: centered variances and covariance.
+    var_x = 0.0
+    var_y = 0.0
+    cov = 0.0
+    pos = 0
+    last_pct = -1
+    while pos < n_pairs:
+        end = min(pos + chunk_size, n_pairs)
+        xc = x[pos:end].astype(np.float64) - mean_x
+        yc = y[pos:end].astype(np.float64) - mean_y
+        var_x += float(np.dot(xc, xc))
+        var_y += float(np.dot(yc, yc))
+        cov += float(np.dot(xc, yc))
+        pos = end
+        if progress_callback:
+            pct = int(55 + (pos / n_pairs) * 5)
+            if pct != last_pct:
+                progress_callback(pct, "Calculating lag-1 serial correlation...")
+                last_pct = pct
+
+    denom = math.sqrt(var_x * var_y)
+    return float(cov / denom) if denom != 0 else 0.0
 
 
 def compute_windowed_analysis(
@@ -256,14 +300,22 @@ def compute_windowed_analysis(
         sub_strides = (data.strides[0] * stride, data.strides[0])
         blocks_view = np.lib.stride_tricks.as_strided(data[start_idx * stride:], shape=sub_shape, strides=sub_strides)
 
-        counts = np.array([(blocks_view == i).sum(axis=1) for i in range(256)], dtype=np.float32)
+        # Single vectorized pass: count all 256 byte values at once instead of
+        # 256 full-array equality scans (one pass over the batch, not 256).
+        n = end_idx - start_idx
+        # Single vectorized pass: per-block byte histograms via one bincount
+        # (bin indices offset by 256 * block_index), instead of 256 full
+        # equality scans over every batch.
+        flat = np.ascontiguousarray(blocks_view).ravel()
+        bin_offset = (np.arange(n * block_size, dtype=np.int64) // block_size) * 256
+        counts = np.bincount(flat + bin_offset, minlength=n * 256).reshape(n, 256).astype(np.float32)
         probs = counts / block_size
 
         with np.errstate(divide='ignore', invalid='ignore'):
             log_probs = np.where(probs > 0, np.log2(probs), 0)
-            entropy_series[start_idx:end_idx] = -np.sum(probs * log_probs, axis=0)
+            entropy_series[start_idx:end_idx] = -np.sum(probs * log_probs, axis=1)
 
-        null_ratio_series[start_idx:end_idx] = counts[0] / block_size
+        null_ratio_series[start_idx:end_idx] = counts[:, 0] / block_size
 
         if progress_callback:
             pct = int(60 + (end_idx / num_blocks) * 35)
@@ -394,3 +446,91 @@ def analyze_file(
         windowed_analysis=window_result,
         trend=trend
     )
+
+# ---------------------------------------------------------------------------
+# Command-line interface: python core.py <file> [--json] [--block-size N] [--stride N]
+# ---------------------------------------------------------------------------
+
+def report_to_dict(report: "AnalysisReport") -> dict:
+    """Converts an AnalysisReport to a JSON-serializable dictionary."""
+    import dataclasses
+
+    def _convert(obj):
+        if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
+            return {f.name: _convert(getattr(obj, f.name)) for f in dataclasses.fields(obj)}
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.floating, np.integer)):
+            return obj.item()
+        if isinstance(obj, (list, tuple)):
+            return [_convert(v) for v in obj]
+        if isinstance(obj, bytes):
+            return obj.hex()
+        return obj
+
+    return _convert(report)
+
+
+def _cli(argv: Optional[List[str]] = None) -> int:
+    """Minimal CLI for headless analysis and JSON report export."""
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(
+        prog="entroPy",
+        description="EntroPy - Forensic entropy & randomness analyzer"
+    )
+    parser.add_argument("file", help="Path to the binary file to analyze")
+    parser.add_argument("--json", action="store_true", help="Emit the full report as JSON")
+    parser.add_argument("--block-size", type=int, default=0, help="Window size in bytes (0 = auto)")
+    parser.add_argument("--stride", type=int, default=0, help="Window stride in bytes (0 = auto)")
+    args = parser.parse_args(argv)
+
+    def _progress(pct: int, msg: str):
+        print(f"\r[{pct:3d}%] {msg}", end="", flush=True, file=sys.stderr)
+
+    try:
+        report = analyze_file(
+            args.file,
+            block_size=args.block_size,
+            stride=args.stride,
+            progress_callback=_progress
+        )
+    except Exception as exc:
+        print(f"\nError: {exc}", file=sys.stderr)
+        return 1
+
+    print("\r" + " " * 60 + "\r", end="", file=sys.stderr)
+
+    if args.json:
+        print(json.dumps(report_to_dict(report), indent=2))
+        return 0
+
+    m = report.metadata
+    g = report.global_metrics
+    t = report.trend
+    print(f"File:              {m.file_path}")
+    print(f"Size:              {m.file_size:,} bytes")
+    print(f"Format:            {m.detected_format}")
+    print(f"Magic bytes:       {m.magic_bytes.hex(' ').upper()}")
+    print(f"MD5:               {m.md5}")
+    print(f"SHA-256:           {m.sha256}")
+    print(f"Shannon entropy:   {g.shannon_entropy:.6f} bits/byte")
+    print(f"Cramer's V:        {g.cramers_v:.6f} ({g.cramers_v * 100:.2f}%)")
+    print(f"Mean byte value:   {g.arithmetic_mean:.4f}")
+    print(f"Serial corr r1:    {g.serial_correlation:.6f}")
+    print(f"Null-byte ratio:   {g.null_byte_ratio:.4%}")
+    print(f"Classification:    {t.dominant_category}")
+    print(f"Probabilities:     corrupted={t.prob_corrupted}% compressed={t.prob_compressed}% "
+          f"encrypted={t.prob_encrypted}% structured={t.prob_structured}% padding={t.prob_padding}%")
+    for r in t.rationale:
+        print(f"  - {r}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(_cli())
+    except BrokenPipeError:
+        # Downstream pipe closed early (e.g. `| head`); exit quietly.
+        os._exit(0)

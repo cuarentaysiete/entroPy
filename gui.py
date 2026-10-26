@@ -50,6 +50,7 @@ class EntroPyGUI(QMainWindow):
         super().__init__()
         self.current_report = None
         self.current_file_path = ""
+        self.thread = None
         
         self.setWindowTitle("EntroPy - Entropy Analyzer")
         self.resize(1500, 980)
@@ -374,17 +375,25 @@ class EntroPyGUI(QMainWindow):
 
     def dropEvent(self, event: QDropEvent):
         urls = event.mimeData().urls()
-        if urls:
+        if urls and self._is_idle():
             file_path = urls[0].toLocalFile()
             if os.path.isfile(file_path):
                 self.start_analysis(file_path)
 
     def select_file(self):
+        if not self._is_idle():
+            return
         file_path, _ = QFileDialog.getOpenFileName(self, "Select File to Analyze", "", "All Files (*)")
         if file_path:
             self.start_analysis(file_path)
 
+    def _is_idle(self) -> bool:
+        """True when no analysis worker thread is currently running."""
+        return self.thread is None or not self.thread.isRunning()
+
     def start_analysis(self, file_path: str):
+        if not self._is_idle():
+            return  # a worker thread is still running; ignore overlapping requests
         self.current_file_path = file_path
         self.lbl_file_name.setText(os.path.basename(file_path))
         self.btn_open.setEnabled(False)
@@ -468,7 +477,7 @@ class EntroPyGUI(QMainWindow):
         entropy_vals = win.entropy_series
         null_vals = win.null_ratio_series * 8.0
 
-        max_offset = offsets[-1] if len(offsets) > 0 else meta.file_size
+        max_offset = offsets[-1] + win.block_size if len(offsets) > 0 else meta.file_size
         
         self.plot_widget.setLimits(
             xMin=0,

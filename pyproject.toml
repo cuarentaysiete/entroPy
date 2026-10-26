@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "entroPy"
+version = "1.0.0"
+description = "Forensic entropy & randomness analyzer with sliding-window GUI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "cuarentaysiete" }]
+dependencies = [
+    "numpy",
+    "PySide6",
+    "pyqtgraph",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+]
+
+[project.scripts]
+entroPy = "gui:main"
+
+[tool.setuptools]
+py-modules = ["core", "gui"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
