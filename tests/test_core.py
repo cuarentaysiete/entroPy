@@ -78,6 +78,56 @@ def test_identify_file_format(magic, expected):
     assert core.identify_file_format(magic) == expected
 
 
+def test_identify_offset_based_signatures():
+    """Signatures located inside the header (tar, DICOM, ISO-BMFF)."""
+    tar = bytearray(1024)
+    tar[257:262] = b"ustar"
+    assert core.identify_file_format(bytes(tar)) == "POSIX tar (ustar)"
+
+    dicom = b"\x00" * 128 + b"DICM\x00\x01"
+    assert core.identify_file_format(dicom) == "DICOM Medical Image"
+
+    assert core.identify_file_format(b"\x00\x00\x00 ftypmp42") == "MP4 / ISOBMFF Media Container"
+
+
+def test_identify_riff_subtypes():
+    """Multi-pair signatures must win over the generic RIFF one."""
+    assert core.identify_file_format(b"RIFF\x00\x00\x00\x00WEBP") == "WebP Image"
+    assert core.identify_file_format(b"RIFF\x00\x00\x00\x00WAVE") == "WAV Audio (RIFF)"
+    assert core.identify_file_format(b"RIFF\x00\x00\x00\x00AVI ") == "AVI Video (RIFF)"
+    assert core.identify_file_format(b"RIFF\x00\x00\x00\x00XXXX") == "RIFF Container (generic)"
+
+
+def test_identify_java_vs_macho_collision():
+    """CAFEBABE prefix is ambiguous; the class version field disambiguates."""
+    assert core.identify_file_format(b"\xca\xfe\xba\xbe\x00\x00\x00\x35") == "Java Bytecode"
+    # Mach-O 64-bit LE: cpu-type field is not 0x0000, so the class pair fails
+    assert core.identify_file_format(b"\xbe\xba\xfe\xca\x07\x00\x07\x00") == "Mach-O Object/Executable"
+
+
+def test_signature_table_uses_external_json():
+    """The external table must load (sqlite is JSON-only, not in the fallback)."""
+    assert core.identify_file_format(b"SQLite format 3\x00") == "SQLite Database"
+    extensions = {ext for _, ext, _ in core._get_type_signatures()}
+    assert len(extensions) > 30  # the embedded fallback has ~15
+
+
+def test_signature_table_fallback_on_missing_json(tmp_path, monkeypatch):
+    """A missing/corrupt JSON must fall back to the embedded table gracefully."""
+    missing = tmp_path / "nope.json"
+    monkeypatch.setattr(core, "_MAGIC_JSON_FILE", missing)
+    monkeypatch.setattr(core, "_TYPE_SIGNATURES", None)
+    table = core._get_type_signatures()
+    assert len(table) == len(core._EMBEDDED_SIGNATURES)
+    assert core.identify_file_format(b"\x89PNG\r\n\x1a\n") == "PNG Image"
+
+    corrupt = tmp_path / "corrupt.json"
+    corrupt.write_text("{ not valid json !!!")
+    monkeypatch.setattr(core, "_MAGIC_JSON_FILE", corrupt)
+    monkeypatch.setattr(core, "_TYPE_SIGNATURES", None)
+    assert core.identify_file_format(b"%PDF-1.7") == "PDF Document"
+
+
 # ---------------------------------------------------------------------------
 # File metadata / hashing
 # ---------------------------------------------------------------------------

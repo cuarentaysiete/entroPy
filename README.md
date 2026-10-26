@@ -20,7 +20,7 @@
   * **Lag-2 Pair Correlation ($r_2$):** Detects alternating/multi-byte periodic structures invisible to lag-1 analysis.
   * **Arithmetic Mean ($\bar{x}$):** Assesses global distribution bias relative to uniform theoretical randomness ($\bar{x} = 127.5$).
 * **Stream Corruption & Zero-Filling Detection:** Automatically identifies localized entropy drops and anomalous padding blocks within compressed/encrypted data streams (e.g., damaged WebM, MKV, or ZIP archives).
-* **Magic Bytes Header Recognition:** Auto-detects standard binary signatures (Matroska/WebM, PE, ELF, ZIP, PNG, JPEG, PDF, ZSTD, 7z) upon loading.
+* **Magic Bytes Header Recognition:** Auto-detects file signatures via an external, easily-extensible table (`magic_signatures.json`, ~60 formats) with offset-aware matching (tar at byte 257, ISO-BMFF at byte 4, DICOM at 128, RIFF subtypes, …); a small embedded fallback keeps identification working if the JSON is missing, so no dependency is required.
 * **Synchronized 512-Byte Region Highlight:** Clicking anywhere on the time-series plot projects a semi-transparent $512\text{-byte}$ region highlight on the graph that locks directly to the real-time Hexadecimal/ASCII inspection pane.
 * **Asynchronous Execution Architecture:** Multi-threaded worker queue (`QThread`) providing continuous percentage updates via a UI progress overlay frame during initial file intake.
 * **Multi-File Batch Analysis:** Drop several files at once (or select them via *Open Files*) to analyze them sequentially in a single run, with a per-file classification summary and isolated per-file error handling.
@@ -171,6 +171,7 @@ The JSON report mirrors the GUI's `AnalysisReport` dataclass (metadata, global m
 entroPy/
 ├── core.py         # Computational statistics engine, memory-mapping, heuristics & CLI
 ├── gui.py          # PySide6 desktop interface, PyQtGraph views & interactive event logic
+├── magic_signatures.json  # External file-signature table (edit to add formats, no code changes)
 ├── pyproject.toml  # Packaging: dependencies, `entroPy` console entry point, dev extras
 ├── requirements.txt# Pinned-less runtime dependencies for manual installs
 ├── tests/

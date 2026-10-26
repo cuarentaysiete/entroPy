@@ -8,11 +8,13 @@ Cramer's V normalized uniformity index, and granular progress callbacks.
 
 from dataclasses import dataclass
 import hashlib
+import json
 import math
 import mmap
 import os
 import sys
-from typing import List, Optional, Callable
+from pathlib import Path
+from typing import Callable, List, Optional, Tuple
 import numpy as np
 
 
@@ -71,38 +73,92 @@ class AnalysisReport:
     trend: TrendEstimation
 
 
-def identify_file_format(magic: bytes) -> str:
-    """Identifies human-readable file format based on magic bytes signatures."""
-    if magic.startswith(b"\x1a\x45\xdf\xa3"):
-        return "WebM / Matroska Video (MKV)"
-    if magic.startswith(b"PK\x03\x04"):
-        return "ZIP Archive / OpenXML Document"
-    if magic.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "PNG Image"
-    if magic.startswith(b"\xff\xd8\xff"):
-        return "JPEG Image"
-    if magic.startswith(b"GIF87a") or magic.startswith(b"GIF89a"):
-        return "GIF Image"
-    if magic.startswith(b"RIFF") and len(magic) >= 12 and magic[8:12] == b"WEBP":
-        return "WebP Image"
-    if magic.startswith(b"%PDF"):
-        return "PDF Document"
-    if magic.startswith(b"\x1f\x8b"):
-        return "GZIP Compressed Archive"
-    if magic.startswith(b"BZh"):
-        return "BZIP2 Compressed Archive"
-    if magic.startswith(b"\xfd7zXZ\x00"):
-        return "XZ Compressed Archive"
-    if magic.startswith(b"\x28\xb5\x2f\xfd"):
-        return "Zstandard (ZSTD) Compressed"
-    if magic.startswith(b"7z\xbc\xaf\x27\x1c"):
-        return "7-Zip Archive"
-    if magic.startswith(b"MZ"):
-        return "Windows PE Executable (.exe/.dll)"
-    if magic.startswith(b"\x7fELF"):
-        return "Linux ELF Executable"
-    if len(magic) >= 8 and magic[4:8] in (b"ftyp", b"moov"):
-        return "MP4 / ISOBMFF Media Container"
+# ---------------------------------------------------------------------------
+# File signature table.
+#
+# Each format is a list of (offset, magic-bytes) pairs that ALL must match.
+# Longer total magics are checked first, so specific signatures (RIFF +
+# "WEBP") win over generic ones (bare RIFF). The table is loaded from
+# magic_signatures.json next to this module (shipped with the repo); if that
+# file is missing or unparseable, the small embedded subset below keeps
+# identification working.
+# ---------------------------------------------------------------------------
+_MAGIC_JSON_FILE = Path(__file__).resolve().with_name("magic_signatures.json")
+
+_EMBEDDED_SIGNATURES: List[dict] = [
+    {"ext": "bmp",  "name": "Windows Bitmap Image",            "signatures": [[0, "424D"]]},
+    {"ext": "cr2",  "name": "Canon Raw (CR2)",                 "signatures": [[0, "4D4D002A"]]},
+    {"ext": "exr",  "name": "OpenEXR Image",                   "signatures": [[0, "76273600"]]},
+    {"ext": "flac", "name": "FLAC Audio",                      "signatures": [[0, "664C6143"]]},
+    {"ext": "jpg",  "name": "JPEG Image",                      "signatures": [[0, "FFD8FF"]]},
+    {"ext": "mp3",  "name": "MP3 Audio (ID3 tag)",             "signatures": [[0, "494433"]]},
+    {"ext": "ogg",  "name": "Ogg Container",                   "signatures": [[0, "4F676753"]]},
+    {"ext": "pdf",  "name": "PDF Document",                    "signatures": [[0, "25504446"]]},
+    {"ext": "png",  "name": "PNG Image",                       "signatures": [[0, "89504E470D0A1A0A"]]},
+    {"ext": "ps",   "name": "PostScript",                      "signatures": [[0, "252D2D2D20"]]},
+    {"ext": "psd",  "name": "Adobe Photoshop",                 "signatures": [[0, "38425053"]]},
+    {"ext": "riff", "name": "RIFF Container (generic)",        "signatures": [[0, "52494646"]]},
+    {"ext": "tiff", "name": "TIFF Image (little-endian)",      "signatures": [[0, "49492A00"]]},
+    {"ext": "webm", "name": "WebM / Matroska Video (MKV)",     "signatures": [[0, "1A45DFA3"]]},
+    {"ext": "zip",  "name": "ZIP Archive / OpenXML Document",  "signatures": [[0, "504B0304"]]},
+]
+
+_TYPE_SIGNATURES: Optional[List[Tuple[Tuple[Tuple[int, bytes], ...], str, str]]] = None
+
+
+def _parse_signature_entries(entries: list) -> list:
+    """Validate/parse raw table entries, dropping malformed ones.
+
+    Returns a list of (signatures, ext, name) sorted by total magic length
+    (descending) so the most specific signatures are checked first.
+    """
+    table = []
+    for entry in entries:
+        try:
+            sigs = tuple(
+                (int(offset), bytes.fromhex(hex_str))
+                for offset, hex_str in entry["signatures"]
+            )
+            ext = str(entry["ext"])
+            name = str(entry.get("name", ext))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not sigs or any(len(magic) == 0 for _, magic in sigs):
+            continue
+        table.append((sigs, ext, name))
+    table.sort(key=lambda item: -sum(len(m) for _, m in item[0]))
+    return table
+
+
+def _get_type_signatures() -> tuple:
+    """Cached signature table: external JSON when available, embedded fallback."""
+    global _TYPE_SIGNATURES
+    if _TYPE_SIGNATURES is None:
+        entries = _EMBEDDED_SIGNATURES
+        try:
+            data = json.loads(_MAGIC_JSON_FILE.read_text(encoding="utf-8"))
+            loaded = data.get("formats") if isinstance(data, dict) else data
+            if isinstance(loaded, list) and loaded:
+                entries = loaded
+        except (OSError, ValueError):
+            pass  # fall back to the embedded table
+        _TYPE_SIGNATURES = tuple(_parse_signature_entries(entries))
+    return _TYPE_SIGNATURES
+
+
+def identify_file_format(data: bytes) -> str:
+    """Identifies the human-readable format from a file-header sample.
+
+    Uses the offset-aware signature table, so signatures located inside the
+    file (tar at byte 257, ISO-BMFF's "ftyp" at byte 4, DICOM at 128) work.
+    """
+    for signatures, _ext, name in _get_type_signatures():
+        for offset, magic in signatures:
+            chunk = data[offset:offset + len(magic)]
+            if len(chunk) != len(magic) or chunk != magic:
+                break
+        else:
+            return name
     return "Unknown / Raw Binary Format"
 
 
@@ -126,8 +182,11 @@ def compute_file_metadata(
     bytes_processed = 0
     last_pct = -1
 
+    # 512-byte header window covers offset-based signatures (e.g. tar's
+    # "ustar" at offset 257); the first 16 bytes are kept for display.
     with open(file_path, "rb") as f:
-        magic_bytes = f.read(16)
+        head = f.read(512)
+        magic_bytes = head[:16]
         f.seek(0)
 
         while chunk := f.read(chunk_size):
@@ -144,7 +203,7 @@ def compute_file_metadata(
                     progress_callback(pct, f"Computing cryptographic hashes ({mb_read:.1f} / {mb_total:.1f} MB)...")
                     last_pct = pct
 
-    detected_format = identify_file_format(magic_bytes)
+    detected_format = identify_file_format(head)
 
     return FileMetadata(
         file_path=os.path.abspath(file_path),
