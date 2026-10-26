@@ -1,11 +1,19 @@
-"""GUI smoke tests (headless, offscreen Qt platform). Skipped if Qt is unavailable."""
+"""GUI smoke tests (headless, offscreen Qt platform).
+
+The entire module is skipped when Qt cannot be initialized in the current
+environment (e.g. a CI runner missing system EGL/OpenGL libraries), so the
+pure-NumPy core suite keeps running everywhere.
+"""
 import os
 import time
 
 import pytest
 
-pytest.importorskip("PySide6")
-QtWidgets = pytest.importorskip("PySide6.QtWidgets")
+try:
+    from PySide6 import QtWidgets
+except ImportError as exc:
+    pytest.skip(f"PySide6/Qt runtime not usable in this environment: {exc}",
+                allow_module_level=True)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 

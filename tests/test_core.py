@@ -2,6 +2,7 @@
 import hashlib
 import json
 import mmap
+import os
 import tempfile
 
 import numpy as np
@@ -15,11 +16,35 @@ import core
 # ---------------------------------------------------------------------------
 
 def make_mmap(data: bytes) -> mmap.mmap:
-    """Memory-maps `data` into a temporary file and returns the mapping."""
-    handle = tempfile.NamedTemporaryFile()
+    """Memory-maps `data` into a temporary file and returns the mapping.
+
+    The underlying handle is registered for deferred cleanup (see the
+    ``_close_temp_handles`` fixture) so locked-file edge cases on Windows
+    never leak into other tests.
+    """
+    handle = tempfile.NamedTemporaryFile(delete=False)
+    _TEMP_HANDLES.append(handle)
     handle.write(data)
     handle.flush()
     return mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ)
+
+
+_TEMP_HANDLES: list = []
+
+
+@pytest.fixture(autouse=True)
+def _close_temp_handles():
+    yield
+    for handle in reversed(_TEMP_HANDLES):
+        try:
+            handle.close()
+        except OSError:
+            pass
+        try:
+            os.unlink(handle.name)
+        except OSError:
+            pass
+    _TEMP_HANDLES.clear()
 
 
 def uniform_bytes(n: int = 1_000_000, seed: int = 42) -> bytes:
@@ -57,32 +82,29 @@ def test_identify_file_format(magic, expected):
 # File metadata / hashing
 # ---------------------------------------------------------------------------
 
-def test_metadata_hashes_known_values():
-    handle = tempfile.NamedTemporaryFile()
-    handle.write(b"abc")
-    handle.flush()
-    meta = core.compute_file_metadata(handle.name)
+def test_metadata_hashes_known_values(tmp_path):
+    path = tmp_path / "abc.bin"
+    path.write_bytes(b"abc")
+    meta = core.compute_file_metadata(str(path))
     assert meta.md5 == hashlib.md5(b"abc").hexdigest()
     assert meta.sha1 == hashlib.sha1(b"abc").hexdigest()
     assert meta.sha256 == hashlib.sha256(b"abc").hexdigest()
     assert meta.file_size == 3
 
 
-def test_metadata_progress_callback_reaches_40():
-    handle = tempfile.NamedTemporaryFile()
-    handle.write(uniform_bytes(1_000_000))
-    handle.flush()
+def test_metadata_progress_callback_reaches_40(tmp_path):
+    path = tmp_path / "payload.bin"
+    path.write_bytes(uniform_bytes(1_000_000))
     seen = []
-    core.compute_file_metadata(handle.name, progress_callback=lambda p, m: seen.append(p))
+    core.compute_file_metadata(str(path), progress_callback=lambda p, m: seen.append(p))
     assert seen and max(seen) == 40
 
 
-def test_metadata_empty_file_raises():
-    handle = tempfile.NamedTemporaryFile()
-    handle.write(b"")
-    handle.flush()
+def test_metadata_empty_file_raises(tmp_path):
+    path = tmp_path / "empty.bin"
+    path.write_bytes(b"")
     with pytest.raises(ValueError):
-        core.compute_file_metadata(handle.name)
+        core.compute_file_metadata(str(path))
 
 
 def test_metadata_missing_file_raises():
