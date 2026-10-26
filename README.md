@@ -17,11 +17,14 @@
   * **Shannon Entropy ($H$):** Measures global and local information density ($0.0 \text{ to } 8.0 \text{ bits/byte}$).
   * **Cramér's V ($V$):** Evaluates non-uniformity as a size-independent normalized metric ($0.0 \text{ to } 1.0$).
   * **Lag-1 Serial Correlation ($r_1$):** Detects contiguity dependencies and pattern repetition between adjacent bytes.
+  * **Lag-2 Pair Correlation ($r_2$):** Detects alternating/multi-byte periodic structures invisible to lag-1 analysis.
   * **Arithmetic Mean ($\bar{x}$):** Assesses global distribution bias relative to uniform theoretical randomness ($\bar{x} = 127.5$).
 * **Stream Corruption & Zero-Filling Detection:** Automatically identifies localized entropy drops and anomalous padding blocks within compressed/encrypted data streams (e.g., damaged WebM, MKV, or ZIP archives).
 * **Magic Bytes Header Recognition:** Auto-detects standard binary signatures (Matroska/WebM, PE, ELF, ZIP, PNG, JPEG, PDF, ZSTD, 7z) upon loading.
 * **Synchronized 512-Byte Region Highlight:** Clicking anywhere on the time-series plot projects a semi-transparent $512\text{-byte}$ region highlight on the graph that locks directly to the real-time Hexadecimal/ASCII inspection pane.
 * **Asynchronous Execution Architecture:** Multi-threaded worker queue (`QThread`) providing continuous percentage updates via a UI progress overlay frame during initial file intake.
+* **Multi-File Batch Analysis:** Drop several files at once (or select them via *Open Files*) to analyze them sequentially in a single run, with a per-file classification summary and isolated per-file error handling.
+* **One-Click JSON Report Export:** Save the complete `AnalysisReport` (metadata, hashes, metrics, windowed series, trend & rationale) as a portable `.entroPy.json` document for forensic evidence chains.
 * **Modern High-DPI Desktop Interface:** Drag-and-drop file loading, zoom boundary protection, card-style metric rows with inline sub-descriptions, and one-click clipboard copy functionality.
 
 ---
@@ -88,6 +91,14 @@ $$r_1 = \frac{\sum_{i=1}^{N-1} (x_i - \bar{x})(x_{i+1} - \bar{x})}{\sum_{i=1}^{N
 
 * **$r_1 \approx 0.0$:** Uncorrelated byte sequences.
 * **$r_1 > 0.1$:** Residual pattern structure typical of uncompressed or partially corrupted streams.
+* **$r_2 \approx 1.0$ with $r_1 \approx -1.0$:** Alternating two-byte periodicity (e.g., interleaved streams) that lag-1 alone would misread as pure anti-correlation.
+
+### 4. Lag-2 Pair Correlation
+Extends the serial-correlation model to bytes two positions apart, exposing alternating and other short-period structures:
+
+$$r_2 = \frac{\sum_{i=1}^{N-2} (x_i - \bar{x})(x_{i+2} - \bar{x})}{\sqrt{\sum (x_i - \bar{x})^2 \sum (x_{i+2} - \bar{x})^2}}$$
+
+Both correlations are computed with streaming two-pass reductions over 4 MiB chunks, keeping peak memory constant regardless of file size.
 
 ---
 
@@ -144,12 +155,13 @@ python core.py file.bin --block-size 8192 --stride 8192   # custom window
 The JSON report mirrors the GUI's `AnalysisReport` dataclass (metadata, global metrics, windowed series, trend + rationale).
 
 ### Analyzing Files
-1. **Intake:** Click the **Open File** button or drag and drop any file directly onto the interface.
+1. **Intake:** Click **Open Files** or drag and drop one or more files onto the interface. Multiple dropped files are analyzed sequentially in a single run, with a per-file classification summary and global progress.
 2. **Progress:** Monitor the real-time percentage progress bar on the overlay pane during calculations.
 3. **Graph Interaction:**
    * **Left-Click:** Select any offset on the time-series plot to display the corresponding $512\text{-byte}$ region highlight on the graph and view the aligned hexadecimal dump below.
    * **Right-Click Drag / Scroll Wheel:** Zoom into localized offset regions. Zoom out is bounded to prevent view displacement beyond valid memory offsets ($0.0 \text{ to } 8.2$).
 4. **Copying Metrics:** Click the **Copy** button alongside any cryptographic hash or global statistical parameter to store the precise value in your clipboard.
+5. **Exporting:** Click **Export Report (JSON)** to save the complete analysis of the selected file as a `.entroPy.json` document (machine-readable, suitable for evidence chains and automation).
 
 ---
 

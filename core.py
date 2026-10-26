@@ -36,6 +36,7 @@ class GlobalMetrics:
     cramers_v_estimate: str
     arithmetic_mean: float
     serial_correlation: float
+    pair_correlation: float
     null_byte_ratio: float
 
 
@@ -191,9 +192,12 @@ def compute_global_statistics(
     null_byte_ratio = float(counts[0] / n_bytes)
 
     if progress_callback:
-        progress_callback(55, "Calculating lag-1 serial correlation...")
+        progress_callback(55, "Calculating serial & pair correlations...")
 
     serial_correlation = _compute_serial_correlation(data, progress_callback)
+    pair_correlation = _compute_serial_correlation(
+        data, progress_callback, lag=2, message="Calculating lag-2 pair correlation..."
+    )
 
     return GlobalMetrics(
         shannon_entropy=shannon_entropy,
@@ -201,6 +205,7 @@ def compute_global_statistics(
         cramers_v_estimate=v_est,
         arithmetic_mean=arithmetic_mean,
         serial_correlation=serial_correlation,
+        pair_correlation=pair_correlation,
         null_byte_ratio=null_byte_ratio
     )
 
@@ -208,21 +213,25 @@ def compute_global_statistics(
 def _compute_serial_correlation(
     data: np.ndarray,
     progress_callback: Optional[Callable[[int, str], None]] = None,
-    chunk_size: int = 1 << 22
+    chunk_size: int = 1 << 22,
+    lag: int = 1,
+    message: str = "Calculating lag-1 serial correlation..."
 ) -> float:
-    """Computes lag-1 serial correlation with O(chunk) peak memory.
+    """Computes lag-N serial correlation with O(chunk) peak memory.
 
-    Uses a two-pass streaming reduction (means first, then centered moments)
-    over fixed-size chunks instead of materializing two float64 copies of the
-    entire file (~16 bytes per byte), keeping peak allocation constant even
-    for multi-gigabyte inputs.
+    Uses a two-pass streaming reduction (centered moments accumulated over
+    fixed-size chunks) instead of materializing float64 copies of the entire
+    file (~16 bytes per byte), keeping peak allocation constant even for
+    multi-gigabyte inputs. `lag=1` measures dependency between adjacent
+    bytes; `lag=2` between bytes two positions apart (detects alternating
+    patterns invisible to lag-1).
     """
-    n_pairs = len(data) - 1
+    n_pairs = len(data) - lag
     if n_pairs <= 0:
         return 0.0
 
-    x = data[:-1]
-    y = data[1:]
+    x = data[:-lag] if lag > 1 else data[:-1]
+    y = data[lag:]
 
     # Pass 1: raw sums for stable means (float64 accumulation).
     sum_x = 0.0
@@ -253,7 +262,7 @@ def _compute_serial_correlation(
         if progress_callback:
             pct = int(55 + (pos / n_pairs) * 5)
             if pct != last_pct:
-                progress_callback(pct, "Calculating lag-1 serial correlation...")
+                progress_callback(pct, message)
                 last_pct = pct
 
     denom = math.sqrt(var_x * var_y)
@@ -519,6 +528,7 @@ def _cli(argv: Optional[List[str]] = None) -> int:
     print(f"Cramer's V:        {g.cramers_v:.6f} ({g.cramers_v * 100:.2f}%)")
     print(f"Mean byte value:   {g.arithmetic_mean:.4f}")
     print(f"Serial corr r1:    {g.serial_correlation:.6f}")
+    print(f"Pair corr r2:      {g.pair_correlation:.6f}")
     print(f"Null-byte ratio:   {g.null_byte_ratio:.4%}")
     print(f"Classification:    {t.dominant_category}")
     print(f"Probabilities:     corrupted={t.prob_corrupted}% compressed={t.prob_compressed}% "

@@ -7,8 +7,9 @@ zoom limits, scaled high-readability fonts, top-right specification panel, Crame
 unabbreviated probability labels, and interactive offset hex inspection.
 """
 
-import sys
+import json
 import os
+import sys
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLabel, QFileDialog, QSplitter, QTextEdit, QPlainTextEdit,
@@ -23,24 +24,47 @@ import core
 
 
 class AnalysisThread(QThread):
-    """Worker thread to execute file analysis with progress reporting."""
-    analysis_complete = Signal(object)
-    analysis_failed = Signal(str)
-    progress_updated = Signal(int, str)
+    """Worker thread analyzing a queue of files sequentially.
 
-    def __init__(self, file_path: str):
+    Results are accumulated in Python-side attributes (``reports``,
+    ``summaries``) and only primitive-typed signals are emitted, keeping
+    cross-thread signal marshalling safe. Progress is a global 0-100%
+    percentage spanning the whole queue.
+    """
+    file_done = Signal(int)          # index of the file just analyzed
+    progress_updated = Signal(int, str)
+    analysis_finished = Signal()     # queue fully processed (see reports[])
+    analysis_failed = Signal(str)    # fatal / cancelled run
+
+    def __init__(self, file_paths):
         super().__init__()
-        self.file_path = file_path
+        self.file_paths = list(file_paths)
+        self.reports: list = []
+        self.summaries: list = []
 
     def run(self):
-        try:
-            def progress_cb(percent: int, status_msg: str):
-                self.progress_updated.emit(percent, status_msg)
+        total = len(self.file_paths)
+        for index, path in enumerate(self.file_paths):
+            base = int(index * 100 / total)
+            span = max(1, int(100 / total) - 1)
 
-            report = core.analyze_file(self.file_path, progress_callback=progress_cb)
-            self.analysis_complete.emit(report)
-        except Exception as e:
-            self.analysis_failed.emit(str(e))
+            def progress_cb(percent: int, status_msg: str,
+                            _base=base, _span=span):
+                self.progress_updated.emit(_base + min(_span, percent), status_msg)
+
+            try:
+                report = core.analyze_file(path, progress_callback=progress_cb)
+                self.reports.append(report)
+                self.summaries.append(
+                    f"{os.path.basename(path)}: {report.trend.dominant_category}"
+                )
+            except Exception as exc:
+                self.reports.append(None)
+                self.summaries.append(f"{os.path.basename(path)}: ERROR — {exc}")
+            self.file_done.emit(index)
+
+        self.progress_updated.emit(100, "Analysis complete.")
+        self.analysis_finished.emit()
 
 
 class EntroPyGUI(QMainWindow):
@@ -74,7 +98,7 @@ class EntroPyGUI(QMainWindow):
         left_header_layout = QHBoxLayout()
         left_header_layout.setSpacing(14)
 
-        self.btn_open = QPushButton("Open File")
+        self.btn_open = QPushButton("Open Files")
         self.btn_open.setFont(QFont("Arial", 12, QFont.Bold))
         self.btn_open.setFixedHeight(44)
         self.btn_open.setFixedWidth(140)
@@ -258,6 +282,9 @@ class EntroPyGUI(QMainWindow):
         self.lbl_correlation, self.btn_copy_correlation = self.create_metric_row(
             metrics_layout, "Serial Correlation (r₁):", "Lag-1 correlation between adjacent contiguous bytes"
         )
+        self.lbl_pair, self.btn_copy_pair = self.create_metric_row(
+            metrics_layout, "Pair Correlation (r₂):", "Lag-2 correlation between bytes two apart (alternating patterns)"
+        )
 
         left_layout.addWidget(group_metrics)
 
@@ -283,6 +310,25 @@ class EntroPyGUI(QMainWindow):
         trend_layout.addWidget(self.lbl_dominant)
         trend_layout.addWidget(self.lbl_probabilities)
         trend_layout.addWidget(self.txt_rationale)
+
+        self.lbl_queue_summary = QLabel("")
+        self.lbl_queue_summary.setWordWrap(True)
+        self.lbl_queue_summary.setStyleSheet("font-size: 11pt; color: #80cbc4;")
+
+        self.btn_export = QPushButton("Export Report (JSON)")
+        self.btn_export.setEnabled(False)
+        self.btn_export.setFixedHeight(36)
+        self.btn_export.setStyleSheet(
+            "QPushButton { background-color: #2e2e2e; color: #d0d0d0; border: 1px solid #444444; "
+            "border-radius: 4px; font-size: 11pt; font-weight: bold; }"
+            "QPushButton:hover { background-color: #3e3e3e; color: #ffffff; }"
+            "QPushButton:pressed { background-color: #007acc; }"
+            "QPushButton:disabled { color: #777777; }"
+        )
+        self.btn_export.clicked.connect(self.export_report)
+
+        trend_layout.addWidget(self.lbl_queue_summary)
+        trend_layout.addWidget(self.btn_export)
 
         left_layout.addWidget(group_trend)
         self.h_splitter.addWidget(left_panel)
@@ -374,40 +420,54 @@ class EntroPyGUI(QMainWindow):
             event.acceptProposedAction()
 
     def dropEvent(self, event: QDropEvent):
-        urls = event.mimeData().urls()
-        if urls and self._is_idle():
-            file_path = urls[0].toLocalFile()
-            if os.path.isfile(file_path):
-                self.start_analysis(file_path)
+        if not self._is_idle():
+            return
+        paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+        # De-duplicate while preserving order, keep existing files only.
+        paths = [p for p in dict.fromkeys(paths) if os.path.isfile(p)]
+        if paths:
+            self.start_analysis(paths)
 
     def select_file(self):
         if not self._is_idle():
             return
-        file_path, _ = QFileDialog.getOpenFileName(self, "Select File to Analyze", "", "All Files (*)")
-        if file_path:
-            self.start_analysis(file_path)
+        files, _ = QFileDialog.getOpenFileNames(
+            self, "Select Files to Analyze", "", "All Files (*)"
+        )
+        if files:
+            self.start_analysis(files)
 
     def _is_idle(self) -> bool:
         """True when no analysis worker thread is currently running."""
         return self.thread is None or not self.thread.isRunning()
 
-    def start_analysis(self, file_path: str):
+    def start_analysis(self, file_paths):
+        """Queues one or more files for sequential background analysis."""
         if not self._is_idle():
             return  # a worker thread is still running; ignore overlapping requests
-        self.current_file_path = file_path
-        self.lbl_file_name.setText(os.path.basename(file_path))
-        self.btn_open.setEnabled(False)
-        self.selection_region.hide()
+        if isinstance(file_paths, str):
+            file_paths = [file_paths]
+        if not file_paths:
+            return
 
-        self.lbl_overlay_msg.setText(f"Analyzing {os.path.basename(file_path)}...")
+        self._reset_results_ui()
+        names = ", ".join(os.path.basename(p) for p in file_paths[:3])
+        if len(file_paths) > 3:
+            names += f" (+{len(file_paths) - 3} more)"
+
+        self.lbl_file_name.setText(names)
+        self.btn_open.setEnabled(False)
+
+        self.lbl_overlay_msg.setText(f"Analyzing {names}...")
         self.overlay_progress.setValue(0)
         self.plot_stacked_layout.setCurrentWidget(self.overlay_frame)
-        
+
         QApplication.processEvents()
 
-        self.thread = AnalysisThread(file_path)
+        self.thread = AnalysisThread(file_paths)
+        self.thread.file_done.connect(self.on_file_done)
         self.thread.progress_updated.connect(self.on_progress_updated)
-        self.thread.analysis_complete.connect(self.on_analysis_complete)
+        self.thread.analysis_finished.connect(self.on_analysis_finished)
         self.thread.analysis_failed.connect(self.on_analysis_failed)
         self.thread.start()
 
@@ -415,10 +475,39 @@ class EntroPyGUI(QMainWindow):
         self.overlay_progress.setValue(percent)
         self.lbl_overlay_msg.setText(f"{status_msg} ({percent}%)")
 
-    def on_analysis_complete(self, report: core.AnalysisReport):
-        self.current_report = report
+    def on_file_done(self, index: int):
+        """Applies a freshly completed per-file report to the results UI."""
+        report = self.thread.reports[index]
+        if report is not None:
+            self.current_file_path = self.thread.file_paths[index]
+            self._apply_report(report)
+
+    def on_progress_updated(self, percent: int, status_msg: str):
+        self.overlay_progress.setValue(percent)
+        self.lbl_overlay_msg.setText(f"{status_msg} ({percent}%)")
+
+    def on_analysis_finished(self):
         self.plot_stacked_layout.setCurrentWidget(self.plot_widget)
         self.btn_open.setEnabled(True)
+        self.btn_export.setEnabled(self.current_report is not None)
+        self._show_queue_summary()
+        if self.thread is not None and all(r is None for r in self.thread.reports):
+            QMessageBox.critical(
+                self, "Analysis Error",
+                "No files could be analyzed.\n" + "\n".join(self.thread.summaries)
+            )
+
+    def on_analysis_failed(self, error_msg: str):
+        self.plot_stacked_layout.setCurrentWidget(self.plot_widget)
+        self.btn_open.setEnabled(True)
+        self._show_queue_summary()
+        QMessageBox.critical(self, "Analysis Error", f"Failed to analyze file:\n{error_msg}")
+
+    # --- Result presentation helpers ---
+
+    def _apply_report(self, report: core.AnalysisReport):
+        """Populates the full results UI (header, metrics, trend, plot) for one report."""
+        self.current_report = report
 
         meta = report.metadata
         metrics = report.global_metrics
@@ -445,6 +534,7 @@ class EntroPyGUI(QMainWindow):
         self.lbl_cramers_v.setText(f"{metrics.cramers_v:.6f} ({metrics.cramers_v * 100:.2f}%)")
         self.lbl_mean.setText(f"{metrics.arithmetic_mean:.4f}")
         self.lbl_correlation.setText(f"{metrics.serial_correlation:.6f}")
+        self.lbl_pair.setText(f"{metrics.pair_correlation:.6f}")
 
         # Update Trend & Rationale Section
         self.lbl_dominant.setText(f"Dominant Classification: {trend.dominant_category}")
@@ -490,13 +580,54 @@ class EntroPyGUI(QMainWindow):
         self.curve_nulls.setData(offsets, null_vals)
         self.plot_widget.setXRange(0, max_offset)
 
-        # Clear Hex View
         self.txt_hex.setPlainText("Click anywhere on the plot to inspect the hexadecimal dump at that offset.")
+        self.btn_export.setEnabled(True)
 
-    def on_analysis_failed(self, error_msg: str):
-        self.plot_stacked_layout.setCurrentWidget(self.plot_widget)
-        self.btn_open.setEnabled(True)
-        QMessageBox.critical(self, "Analysis Error", f"Failed to analyze file:\n{error_msg}")
+    def _reset_results_ui(self):
+        """Returns all result widgets to their pre-analysis state."""
+        self.current_report = None
+        self.lbl_file_size_val.setText("-")
+        self.lbl_magic_bytes_val.setText("-")
+        self.lbl_detected_format_val.setText("-")
+        for lbl in (self.lbl_md5, self.lbl_sha256, self.lbl_entropy,
+                    self.lbl_cramers_v, self.lbl_mean, self.lbl_correlation, self.lbl_pair):
+            lbl.setText("-")
+        self.lbl_dominant.setText("Dominant Classification: -")
+        self.lbl_probabilities.setText(
+            "Probabilities: Corrupted: - | Compressed: - | Encrypted: - | Structured: - | Padding: -"
+        )
+        self.lbl_queue_summary.setText("")
+        self.txt_rationale.clear()
+        self.txt_hex.setPlainText("Click anywhere on the plot to inspect the hexadecimal dump at that offset.")
+        self.btn_export.setEnabled(False)
+        self.selection_region.hide()
+
+    def _show_queue_summary(self):
+        """Shows a one-line-per-file classification summary for multi-file runs."""
+        if self.thread is None or len(self.thread.file_paths) < 2:
+            return
+        self.lbl_queue_summary.setText("Queue: " + "  |  ".join(self.thread.summaries))
+
+    def export_report(self):
+        """Saves the current AnalysisReport as a human-readable JSON file."""
+        if self.current_report is None or not self.current_file_path:
+            return
+        base_name = os.path.basename(self.current_file_path)
+        default_name = f"{base_name}.entroPy.json"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Analysis Report", default_name, "JSON Report (*.json)"
+        )
+        if not file_path:
+            return
+        if not file_path.endswith(".json"):
+            file_path += ".json"
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                json.dump(core.report_to_dict(self.current_report), f, indent=2)
+            self.btn_export.setText("Exported ✓")
+            QTimer.singleShot(1500, lambda: self.btn_export.setText("Export Report (JSON)"))
+        except OSError as exc:
+            QMessageBox.warning(self, "Export Error", f"Could not write report:\n{exc}")
 
     def on_plot_clicked(self, event):
         if self.current_report is None or not self.current_file_path:
