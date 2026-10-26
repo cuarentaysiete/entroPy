@@ -192,6 +192,23 @@ pip install -e ".[dev]"
 python -m pytest
 ```
 
+### Building the macOS App
+
+Two ways to get a double-clickable `entroPy.app`:
+
+1. **GitHub Actions (no local tooling needed):** in the repo's *Actions* tab, run the
+   **Build macOS App** workflow, wait a few minutes, and download the artifact
+   (`entroPy-macos-arm64` or `-x86_64` depending on your Mac). Unzip and drag the
+   `.app` into *Applications*.
+2. **Locally (on macOS):** `pip install -e . pyinstaller && pyinstaller entroPy.spec`
+   → `dist/entroPy/entroPy.app`.
+
+The app is **not code-signed/notarized**: first launch will be blocked by Gatekeeper —
+click the right mouse button → *Open* once (or run
+`xattr -dr com.apple.quarantine /Applications/entroPy.app`), then it runs normally.
+If you hold an Apple Development certificate, run
+`codesign --deep --sign "Developer ID Application: ..." dist/entroPy.app` before zipping.
+
 ---
 
 ## License

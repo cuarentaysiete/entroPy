@@ -7,6 +7,10 @@ env/
 __pycache__/
 *.py[cod]
 
+# PyInstaller build output (the recipe entroPy.spec is tracked)
+build/
+dist/
+
 # macOS System Files
 .DS_Store
 
