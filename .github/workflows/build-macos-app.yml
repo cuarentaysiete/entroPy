@@ -1,23 +1,18 @@
 name: Build macOS App
 
 # Manual: Actions tab -> "Build macOS App" -> "Run workflow".
-# Produces a double-clickable .app as a downloadable artifact for both
-# Apple Silicon and Intel Macs.
+# Produces a double-clickable .app as a downloadable artifact (Apple Silicon).
+#
+# NOTE: only macos-latest (arm64) is built — GitHub retired the macos-13
+# (Intel) runner label, so hosted x86_64 builds are no longer possible.
+# Users on Intel Macs should build locally (see README).
 
 on:
   workflow_dispatch:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest   # Apple Silicon (arm64)
-            arch: arm64
-          - os: macos-13       # Intel (x86_64)
-            arch: x86_64
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
 
@@ -35,10 +30,14 @@ jobs:
 
       - name: Bundle (zip)
         shell: bash
-        run: cd dist && zip -qr "entroPy-macos-${{ matrix.arch }}.zip" entroPy.app
+        # PyInstaller onedir layout: dist/entroPy/entroPy.app
+        run: |
+          cd dist/entroPy
+          zip -qr "../entroPy-macos-arm64.zip" entroPy.app
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: entroPy-macos-${{ matrix.arch }}
-          path: dist/entroPy-macos-*.zip
+          name: entroPy-macos-arm64
+          path: dist/entroPy-macos-arm64.zip
+          retention-days: 30
