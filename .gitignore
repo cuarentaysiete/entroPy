@@ -15,8 +15,7 @@ __pycache__/
 .idea/
 *.spyder3
 
-# Test files & large binaries
+# Large binary test datasets (the automated suite itself lives in tests/ and is tracked)
 *.psd
 *.webm
 test files/
-tests/
